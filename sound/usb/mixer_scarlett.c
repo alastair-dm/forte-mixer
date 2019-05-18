@@ -152,6 +152,7 @@ enum {
 	SCARLETT_OUTPUTS,
 	SCARLETT_SWITCH_IMPEDANCE,
 	SCARLETT_SWITCH_PAD,
+	FORTE_OUTPUTS,
 };
 
 enum {
@@ -630,7 +631,64 @@ static int add_output_ctls(struct usb_mixer_interface *mixer,
 	return 0;
 }
 
+static int add_forte_output_ctls(struct usb_mixer_interface *mixer,
+			   int index, const char *name,
+			   const struct scarlett_device_info *info)
+{
+	int err;
+	char mx[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
+	struct usb_mixer_elem_info *elem;
+
+	/* Add mute switch */
+	snprintf(mx, sizeof(mx), "Master %d (%s) Playback Switch",
+		index + 1, name);
+	err = add_new_ctl(mixer, &usb_scarlett_ctl_switch,
+			  scarlett_ctl_resume, 0x0a, 0x01,
+			  2*index+1, USB_MIXER_S16, 2, mx, NULL, &elem);
+	if (err < 0)
+		return err;
+
+	/* Add volume control and initialize to 0 */
+	snprintf(mx, sizeof(mx), "Master %d (%s) Playback Volume",
+		index + 1, name);
+	err = add_new_ctl(mixer, &usb_scarlett_ctl_master,
+			  scarlett_ctl_resume, 0x0a, 0x02,
+			  2*index+1, USB_MIXER_S16, 2, mx, NULL, &elem);
+	if (err < 0)
+		return err;
+
+	return 0;
+}
+
 /********************** device-specific config *************************/
+
+static struct scarlett_device_info forte_info = {
+	.matrix_in = 6,
+	.matrix_out = 4,
+	.input_len = 2,
+	.output_len = 4,
+
+	.opt_master = {
+		.start = -1,
+		.len = 13,
+		.offsets = {0, 4, 6, 6, 6},
+		.names = NULL
+	},
+
+	.opt_matrix = {
+		.start = -1,
+		.len = 7,
+		.offsets = {0, 4, 6, 6, 6},
+		.names = NULL
+	},
+
+	.num_controls = 2,
+	.controls = {
+		{ .num = 0, .type = FORTE_OUTPUTS, .name = "Line Out" },
+		{ .num = 1, .type = FORTE_OUTPUTS, .name = "Headphone" },
+	},
+
+};
 
 /*  untested...  */
 static struct scarlett_device_info s6i6_info = {
@@ -893,6 +951,11 @@ static int scarlett_controls_create_generic(struct usb_mixer_interface *mixer,
 			if (err < 0)
 				return err;
 			break;
+		case FORTE_OUTPUTS:
+			err = add_forte_output_ctls(mixer, ctl->num, ctl->name, info);
+			if (err < 0)
+				return err;
+			break;
 		}
 	}
 
@@ -995,6 +1058,67 @@ int snd_scarlett_controls_create(struct usb_mixer_interface *mixer)
 		USB_RECIP_INTERFACE | USB_TYPE_CLASS |
 		USB_DIR_OUT, 0x0100, snd_usb_ctrl_intf(mixer->chip) |
 		(0x29 << 8), sample_rate_buffer, 4);
+	if (err < 0)
+		return err;
+
+	return err;
+}
+
+/*
+ * Create and initialize a mixer for the Focusrite(R) Forte
+ */
+int snd_forte_controls_create(struct usb_mixer_interface *mixer)
+{
+	int err, i, o;
+	char mx[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
+	struct scarlett_device_info *info;
+	struct usb_mixer_elem_info *elem;
+
+	/* only use UAC_VERSION_2 */
+	if (!mixer->protocol)
+		return 0;
+
+	switch (mixer->chip->usb_id) {
+	case USB_ID(0x1235, 0x8010):
+		info = &forte_info;
+		break;
+	default: /* device not (yet) supported */
+		return -EINVAL;
+	}
+
+	/* generic function to create controls */
+	err = scarlett_controls_create_generic(mixer, info);
+	if (err < 0)
+		return err;
+
+	/* setup matrix controls */
+	for (i = 0; i < info->matrix_in; i++) {
+		snprintf(mx, sizeof(mx), "Matrix %02d Input Playback Route",
+			 i+1);
+		err = add_new_ctl(mixer, &usb_scarlett_ctl_dynamic_enum,
+				  scarlett_ctl_enum_resume, 0x32,
+				  0x06, i, USB_MIXER_S16, 1, mx,
+				  &info->opt_matrix, &elem);
+		if (err < 0)
+			return err;
+
+		for (o = 0; o < info->matrix_out; o++) {
+			sprintf(mx, "Matrix %02d Mix %c Playback Volume", i+1,
+				o+'A');
+			err = add_new_ctl(mixer, &usb_scarlett_ctl,
+					  scarlett_ctl_resume, 0x3c, 0x01,
+					  (i << 2) + (o & 0x03), USB_MIXER_S16,
+					  1, mx, NULL, &elem);
+			if (err < 0)
+				return err;
+
+		}
+	}
+
+	/* val_len == 1 and UAC2_CS_MEM */
+	err = add_new_ctl(mixer, &usb_scarlett_ctl_sync, NULL, 0x3c, 0x00, 2,
+			  USB_MIXER_U8, 1, "Sample Clock Sync Status",
+			  &opt_sync, &elem);
 	if (err < 0)
 		return err;
 
